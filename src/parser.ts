@@ -363,7 +363,7 @@ export default class Grammar {
                 throw stats.wrap(e);
             }
             if (next.length == 0) {
-                throw new ParseError(ch == "" ? "No more input" : "No production match").at(stats);
+                throw new ParseError(ch == "" ? "No more input" : `No production match for '${ch.replace('\n', '\\n').replace('\r', '\\r')}'`).at(stats);
             }
             return next;
         }
