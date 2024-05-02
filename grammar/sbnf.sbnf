@@ -1,0 +1,20 @@
+#root grammar
+grammar    => grammar  = WS* root:root (WS+ rules[]:rule)+ WS*
+root       => name     = "#" WS* "root" WS+ name:ident
+rule       => rule     = name:ident WS* ("=>" WS* func:ident WS*)? "=" WS* rhs:expr
+expr       => option   = exprs[]:seq (WS* "|" WS* exprs[]:seq)*
+seq        => sequence = exprs[]:repetition (WS+ exprs[]:repetition)*
+repetition => expr     = expr:term | expr:optional | expr:repeated | expr:required
+optional   => optional = expr:term WS* "?"
+repeated   => repeated = expr:term WS* "*"
+required   => required = expr:term WS* "+"
+term       => expr     = "(" WS* expr:expr WS* ")" | expr:ref | expr:literal | expr:regex | expr:dot
+ref        => ref      = (label:ident WS* ":" WS*)? name:ident
+
+dot => dot = "."
+ident = /[a-zA-Z0-9]/ /[a-zA-Z0-9_]/* 
+literal => literal = '"' lit:double '"' | "'" lit:single "'"
+double = ("\\" . | /[^\\\"]/)*
+singgle = ("\\" . | /[^\\\']/)*
+regex => regex = '/' ("\\" . | /[^\\\/]/)+ '/'
+WS = /\s/+

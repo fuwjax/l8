@@ -1,0 +1,24 @@
+{
+  "name": "l8",
+  "version": "1.0.0",
+  "description": "Sensible Earley parsing",
+  "main": "index.js",
+  "directories": {
+    "test": "spec"
+  },
+  "scripts": {
+    "test": "ts-node node_modules/jasmine/bin/jasmine"
+  },
+  "keywords": [
+    "earley",
+    "parser"
+  ],
+  "author": "Fuwjax",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/jasmine": "^5.1.4",
+    "jasmine": "^5.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
