@@ -1,391 +1,213 @@
-/**
- * A state of partial match during a parse. "State" is borrowed from Earley's white paper 
- * (archived at https://web.archive.org/web/20040708052627/http://www-2.cs.cmu.edu/afs/cs.cmu.edu/project/cmt-55/lti/Courses/711/Class-notes/p94-earley.pdf)
- * and is probably a poor name for this object in this OO version of the algoritm. 
- * 
- * A few upfront definitions: A Grammar is built of a series of Rules, one of which is called the Root. A Rule is a name plus an Expression.
- * An Expression, at least for purposes of this discussion, is a factory for producing States. The expression in a rule is called the 
- * right hand side (RHS) and is the root of a directed acyclic graph of Expressions. 
- * 
- * An Expression will either explicitly target characters from the input (called a terminal) or reference other expressions (non-terminals). During the parse,
- * an expression will "start", producing zero or more states. A state will either "predict" non-terminals or "scan" terminals as it walks a path on the
- * Expression DAG. When it reaches the end of the path it will "complete" calling "next" on the state that predicted it. 
- * 
- */
-interface State {
-    predict(cache: RefCache): State[];
-
-    complete(): State[];
-
-    scan(ch: string): State[];
-
-    next(result: any): State[];
-}
-
-interface Expr {
-    start(parent: State, cache: RefCache): State[];
-}
-
-export class Stats {
-    constructor(private line: number = 1, private char: number = 0, private total: number = 0) { }
-    public accept(ch: string) {
-        this.total += ch.length;
-        if (ch == "\n") {
-            this.line++;
-            this.char = 0;
-        } else {
-            this.char += ch.length;
-        }
-    }
-
-    wrap(e: Error): Error {
-        if (e instanceof ParseError) {
-            throw e.at(this);
-        } else {
-            throw e;
-        }
-    }
-
-    toString(): string {
-        return `at line ${this.line}: ${this.char} (${this.total})`;
-    }
-}
-
-export class ParseError extends Error {
-    private stats: Stats;
-    constructor(message: string) {
-        super(message);
-    }
-    public at(stats: Stats): ParseError {
-        this.stats = stats;
-        this.message += " " + stats;
-        return this;
-    }
-}
-
-class RootState implements State {
-    constructor(private rule: Expr, public isComplete: boolean = false, public result: any = {}) { }
-    public predict(cache: RefCache): State[] {
-        if (!this.isComplete) {
-            return this.rule.start(this, cache);
-        }
-        return [];
-    }
-    public next(result: any): State[] {
-        return [new RootState(this.rule, true, result)];
-    }
-    public complete(): State[] {
-        return [];
-    }
-    public scan(ch: string) {
-        return [];
-    }
-}
-
-class Ref implements Expr {
-    constructor(private name: string) { }
-
-    public start(parent: State, cache: RefCache): State[] {
-        return cache.get(this.name, parent);
-    }
-}
-
-class RefState implements State {
-    constructor(private name: string, private expr: Expr, public parents: State[], private isComplete: boolean = false, private result: any[] = []) {
-    }
-    public predict(cache: RefCache): State[] {
-        if (!this.isComplete) {
-            return this.expr.start(this, cache);
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parents.map(p => p.next({ [this.name]: this.result })).reduce((a, r) => a.concat(r), []);
-        }
-        return [];
-    }
-    public next(result: any): State[] {
-        return [new RefState(this.name, this.expr, this.parents, true, [...this.result, result])];
-    }
-    public scan(ch: string) {
-        return [];
-    }
-}
-
-class RefCache {
-    private cache = new Map<string, RefState>();
-    constructor(private rules: Map<string, Expr>) { }
-
-    get(name: string, parent: State): State[] {
-        let state = this.cache.get(name);
-        if (state instanceof RefState) {
-            state.parents.push(parent);
-            return [];
-        }
-        let rule = this.rules.get(name);
-        if (rule === undefined) {
-            throw new ParseError("Rule undefined: " + name);
-        }
-        state = new RefState(name, rule, [parent]);
-        this.cache.set(name, state);
-        return [state];
-    }
-}
-
-class SeqState implements State {
-    constructor(private parent: State, private symbols: Expr[], private pos = 0, private result: any[] = []) {
-    }
-    public predict(cache: RefCache): State[] {
-        if (this.pos < this.symbols.length) {
-            return this.symbols[this.pos].start(this, cache);
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.pos == this.symbols.length) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-    public next(result: any): State[] {
-        return [new SeqState(this.parent, this.symbols, this.pos + 1, [...this.result, result])];
-    }
-    public scan(ch: string) {
-        return [];
-    }
-}
-
-class Sequence implements Expr {
-    constructor(private symbols: Expr[]) { }
-    public start(parent: State, cache: RefCache): State[] {
-        return [new SeqState(parent, this.symbols)];
-    }
-}
-
-class Options implements Expr {
-    constructor(public options: Expr[]) { }
-    public start(parent: State, cache: RefCache): State[] {
-        return this.options.map(o => o.start(parent, cache)).reduce((a, r) => a.concat(r), []);
-    }
-}
-
-class RangeState implements State {
-    constructor(private parent: State, private range: RangeExpr, private count = 0, private result: any[] = []) {
-    }
-    public predict(cache: RefCache): State[] {
-        if (this.count < this.range.high) {
-            return this.range.symbol.start(this, cache);
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.count >= this.range.low && this.count <= this.range.high) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-    public next(result: any): State[] {
-        return [new RangeState(this.parent, this.range, this.count + 1, [...this.result, result])];
-    }
-    public scan(ch: string) {
-        return [];
-    }
-}
-
-class UnboundedRangeState implements State {
-    constructor(private parent: State, private range: RangeExpr, private count = 0, private result: any[] = []) {
-    }
-    public predict(cache: RefCache): State[] {
-        return this.range.symbol.start(this, cache);
-    }
-    public complete(): State[] {
-        if (this.count >= this.range.low) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-    public next(result: any): State[] {
-        return [new UnboundedRangeState(this.parent, this.range, this.count + 1, [...this.result, result])];
-    }
-    public scan(ch: string) {
-        return [];
-    }
-}
-
-class RangeExpr implements Expr {
-    constructor(public symbol: Expr, public low: number, public high: number) { }
-    public start(parent: State): State[] {
-        if (this.high == -1) {
-            return [new UnboundedRangeState(parent, this)];
-        }
-        return [new RangeState(parent, this)];
-    }
-}
-
-class LiteralState implements State {
-    constructor(private parent: State, private literal: string[], private pos = 0, private result = "") {
-    }
-    public predict(cache: RefCache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (this.pos < this.literal.length && this.literal[this.pos] == ch) {
-            return [new LiteralState(this.parent, this.literal, this.pos + 1, this.result + ch)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.pos == this.literal.length) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-}
-
-class Literal implements Expr {
-    literal: string[];
-    constructor(literal: string) {
-        this.literal = [...literal];
-    }
-
-    public start(parent: State): State[] {
-        return [new LiteralState(parent, this.literal)];
-    }
-}
-
-class DotState implements State {
-    constructor(private parent: State, private isComplete = false, private result = "") {
-    }
-    public predict(cache: RefCache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (!this.isComplete) {
-            return [new DotState(this.parent, true, ch)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-}
-
-class Dot implements Expr {
-    public start(parent: State): State[] {
-        return [new DotState(parent)];
-    }
-}
-
-class RegExState implements State {
-    constructor(private parent: State, private chars: RegExp, private isComplete: boolean = false, private result = "") {
-    }
-    public predict(cache: RefCache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (!this.isComplete && this.chars.test(ch)) {
-            return [new RegExState(this.parent, this.chars, true, ch)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.result);
-        }
-        return [];
-    }
-}
-
-// the intention is to only match character classes, i.e. [a-zA-Z0-9]
-class RegularExpr implements Expr {
-    chars: RegExp;
-    constructor(charclass: string) {
-        this.chars = new RegExp(charclass);
-    }
-
-    start(parent: State): State[] {
-        return [new RegExState(parent, this.chars)];
-    }
-}
+import { State, Expr, ParseError, Cache, concat } from "./core";
+import { Ref } from "./ref";
+import { Sequence, Options, RangeExpr } from "./nonterm";
+import { Dot, Literal, RegularExpr } from "./term";
 
 export interface Parser {
     parse(input: Iterable<string>): any;
 }
 
-export default class Grammar {
-    constructor(private root: string, private rules = new Map<string, Expr>()) { }
+export interface StepParser {
+    accept(ch: string);
+    complete(): any;
+}
 
-    public add(name: string, rhs: Expr) {
-        if (this.rules.has(name)) {
-            let exist = this.rules.get(name);
-            if (exist instanceof Options) {
-                exist.options.push(rhs);
-            } else {
-                this.rules.set(name, new Options([exist, rhs]))
-            }
+class Rule implements Expr {
+    rhs: Expr;
+    startState: () => any;
+    callback: (o: object) => any;
+    constructor(public name: string, private hook: string, ...rhs: Expr[]) {
+        this.rhs = seq(...rhs);
+    }
+
+    init(callbacks: object) {
+        if (this.hook === undefined) {
+            this.callback = o => o;
+            this.startState = () => undefined;
         } else {
-            this.rules.set(name, rhs);
+            this.startState = () => { return {} };
+            this.callback = callbacks[this.hook];
+            if (this.callback === undefined) {
+                this.callback = (o: object) => o[this.hook];
+            }
         }
     }
 
-    GParser = class implements Parser {
-        constructor(private grammar: Grammar) { }
+    start(parent: State, cache: Cache): State[] {
+        return [new RuleState(this, parent, this.startState(), this.callback)];
+    }
 
-        private accept(ch: string, stats: Stats, states: State[]): State[] {
-            stats.accept(ch);
-            let cache = new RefCache(this.grammar.rules);
+    add(...rhs: Expr[]) {
+        if (this.rhs instanceof Options) {
+            this.rhs.options.push(seq(...rhs));
+        } else {
+            this.rhs = opt(this.rhs, seq(...rhs));
+        }
+    }
+    public toString(): string {
+        return this.name;
+    }
+}
+
+class RuleState implements State {
+    constructor(private rule: Rule, public parent: State, private buffer: any,
+        private hook: (o: object) => any = o => o, private isComplete: boolean = false) {
+    }
+    public predict(cache: Cache): State[] {
+        if (!this.isComplete) {
+            return this.rule.rhs.start(this, cache);
+        }
+        return [];
+    }
+    public complete(): State[] {
+        if (this.isComplete) {
+            let value = this.hook(this.buffer);
+            return this.parent.next(value);
+        }
+        return [];
+    }
+    public next(update: any): State[] {
+        return [new RuleState(this.rule, this.parent, update, this.hook, true)];
+    }
+    public scan(ch: string): State[] {
+        return [];
+    }
+    public result(): any {
+        return this.buffer;
+    }
+    isEnd(): boolean {
+        return false;
+    }
+    public toString(): string {
+        return this.rule.toString();
+    }
+}
+
+export default class Grammar {
+    private rules: Map<string, Rule> = new Map<string, Rule>();
+    constructor(private root: string, private callbacks = {}, ...rules: Rule[]) {
+        for (let rule of rules) {
+            this.add(rule);
+        }
+    }
+
+    public add(rule: Rule) {
+        if (this.rules.has(rule.name)) {
+            this.rules.get(rule.name).add(rule.rhs);
+        } else {
+            rule.init(this.callbacks);
+            this.rules.set(rule.name, rule);
+        }
+    }
+
+    public configure(config: string) {
+        let rules = sbnfg.parse(config);
+        for (let rule of rules) {
+            this.add(rule);
+        }
+    }
+
+    StepParser = class implements StepParser {
+        private line: number = 1;
+        private char: number = 0;
+        private total: number = 0;
+        private states: State[];
+
+        constructor(private grammar: Grammar) {
+            this.states = new Ref(this.grammar.root).root();
+        }
+
+        RefCache = class implements Cache {
+            private cache = new Map<string, State>();
+            constructor(private grammar: Grammar) { }
+            getState(ref: string): State {
+                return this.cache.get(ref);
+            }
+            setState(ref: string, state: State) {
+                this.cache.set(ref, state);
+            }
+            getRule(ref: string): Expr {
+                return this.grammar.rules.get(ref);
+            }
+        }
+
+        private stats(ch: string) {
+            this.total += ch.length;
+            if (ch == "\n") {
+                this.line++;
+                this.char = 0;
+            } else {
+                this.char += ch.length;
+            }
+        }
+
+        private onError(e: Error): Error {
+            e.message += ` at line ${this.line}: ${this.char} (${this.total})`;
+            return e;
+        }
+
+        accept(ch: string) {
+            this.stats(ch);
+            let cache = new this.RefCache(this.grammar);
             var next: State[] = [];
             try {
-                while (states.length > 0) {
-                    var state: State = states.pop();
-                    states.push(...state.predict(cache));
-                    states.push(...state.complete());
+                while (this.states.length > 0) {
+                    var state: State = this.states.pop();
+                    this.states.push(...state.predict(cache));
+                    this.states.push(...state.complete());
                     if (ch != "") {
                         next.push(...state.scan(ch));
-                    } else if (state instanceof RootState && state.isComplete) {
+                    } else if (state.isEnd()) {
                         next.push(state);
                     }
                 }
             } catch (e) {
-                throw stats.wrap(e);
+                throw this.onError(e);
             }
             if (next.length == 0) {
-                throw new ParseError(ch == "" ? "No more input" : `No production match for '${ch.replace('\n', '\\n').replace('\r', '\\r')}'`).at(stats);
+                let escape = ch.replace('\n', '\\n').replace('\r', '\\r');
+                throw this.onError(new ParseError(ch == "" ? "No more input" : `No production match for '${escape}'`));
             }
-            return next;
+            this.states = next;
         }
 
+        complete(): any {
+            this.accept("");
+            return this.states.pop().result();
+        }
+    }
+
+    Parser = class implements Parser {
+        constructor(private grammar: Grammar) { }
+
         public parse(input: Iterable<string>): any {
-            let stats = new Stats();
-            var states: State[] = [new RootState(new Ref(this.grammar.root))];
+            let parse = this.grammar.stepParser();
             for (var ch of input) {
-                states = this.accept(ch, stats, states);
+                parse.accept(ch);
             }
-            states = this.accept("", stats, states);
-            return (states.pop() as RootState).result;
+            return parse.complete();
         }
     };
 
     public parser(): Parser {
-        return new this.GParser(this);
+        return new this.Parser(this);
+    }
+
+    public stepParser(): StepParser {
+        return new this.StepParser(this);
     }
 
     public parse(input: Iterable<string>): any {
         return this.parser().parse(input);
     }
+}
+
+export function hook(name: string, hook: string, ...rhs: Expr[]) {
+    return new Rule(name, hook, ...rhs);
+}
+
+export function rule(name: string, ...rhs: Expr[]) {
+    return hook(name, undefined, ...rhs);
 }
 
 export function dot(): Expr {
@@ -396,15 +218,21 @@ export function lit(expr: string): Expr {
     return new Literal(expr);
 }
 
-export function cc(expr: string): Expr {
+export function re(expr: string | RegExp): Expr {
     return new RegularExpr(expr);
 }
 
 export function seq(...exprs: Expr[]): Expr {
+    if (exprs.length == 1) {
+        return exprs[0];
+    }
     return new Sequence(exprs);
 }
 
 export function opt(...exprs: Expr[]): Expr {
+    if (exprs.length == 1) {
+        return exprs[0];
+    }
     return new Options(exprs);
 }
 
@@ -412,18 +240,55 @@ export function range(expr: Expr, low: number, high: number): Expr {
     return new RangeExpr(expr, low, high);
 }
 
-export function optional(expr: Expr): Expr {
-    return range(expr, 0, 1);
+export function optional(...exprs: Expr[]): Expr {
+    return range(seq(...exprs), 0, 1);
 }
 
-export function required(expr: Expr): Expr {
-    return range(expr, 1, -1);
+export function required(...exprs: Expr[]): Expr {
+    return range(seq(...exprs), 1, -1);
 }
 
-export function repeated(expr: Expr): Expr {
-    return range(expr, 0, -1);
+export function repeated(...exprs: Expr[]): Expr {
+    return range(seq(...exprs), 0, -1);
 }
 
-export function ref(name: string): Expr {
-    return new Ref(name);
+export function ref(name: string, label: string = undefined): Expr {
+    if (label === undefined) {
+        return new Ref(name).merge();
+    }
+    return new Ref(name).label(label);
 }
+
+let WS = () => repeated(ref("WS"));
+const sbnfg = new Grammar("grammar", {
+    rule: (o: { name: string, hook: string, rhs: Expr }) => hook(o.name, o.hook, o.rhs),
+    option: (o: { exprs: Expr[] }) => opt(...o.exprs),
+    sequence: (o: { exprs: Expr[] }) => seq(...o.exprs),
+    optional: (o: { expr: Expr }) => optional(o.expr),
+    repeated: (o: { expr: Expr }) => repeated(o.expr),
+    required: (o: { expr: Expr }) => required(o.expr),
+    ref: (o: { name: string, label: string }) => ref(o.name, o.label),
+    dot: () => dot(),
+    literal: (o: { lit: string }) => lit(o.lit),
+    regex: (o: { pattern: string }) => re(o.pattern),
+},
+    hook("grammar", "rules", WS(), ref("rule", "rules[]"), required(required(ref("WS")), ref("rule", "rules[]")), WS()),
+    hook("rule", "rule", ref("ident", "name"), WS(), optional(lit("=>"), WS(), ref("ident", "hook"), WS()), lit("="), WS(), ref("expr", "rhs")),
+    hook("expr", "option", ref("seq", "exprs[]"), repeated(WS(), lit("|"), WS(), ref("seq", "exprs[]"))),
+    hook("seq", "sequence", ref("repetition", "exprs[]"), repeated(required(ref("WS")), ref("repetition", "exprs[]"))),
+    hook("repetition", "expr", opt(ref("term", "expr"), ref("optional", "expr"), ref("repeated", "expr"), ref("required", "expr"))),
+    hook("optional", "optional", ref("term", "expr"), WS(), lit("?")),
+    hook("repeated", "repeated", ref("term", "expr"), WS(), lit("*")),
+    hook("required", "required", ref("term", "expr"), WS(), lit("+")),
+    hook("term", "expr", opt(seq(lit("("), WS(), ref("expr", "expr"), WS(), lit(")")), ref("ref", "expr"), ref("literal", "expr"), ref("regex", "expr"), ref("dot", "expr"))),
+    hook("ref", "ref", optional(ref("label", "label"), WS(), lit(":"), WS()), ref("ident", "name")),
+    hook("dot", "dot", lit(".")),
+    hook("literal", "literal", opt(seq(lit("\""), ref("double", "lit"), lit("\"")), seq(lit("'"), ref("single", "lit"), lit("'")))),
+    hook("regex", "regex", lit("/"), ref("re", "pattern"), lit("/")),
+    rule("label", ref("ident"), optional(lit("[]"))),
+    rule("ident", re(/[a-zA-Z_]/), repeated(re(/[a-zA-Z0-9_]/))),
+    rule("double", repeated(opt(seq(lit("\\"), dot()), re(/[^\\"]/)))),
+    rule("single", repeated(opt(seq(lit("\\"), dot()), re(/[^\\']/)))),
+    rule("re", required(opt(seq(lit("\\"), dot()), re(/[^\\/]/)))),
+    rule("WS", re(/\s/))
+);
