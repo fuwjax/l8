@@ -1,6 +1,7 @@
 import "jasmine";
 import { ParseError } from "../src/core";
 import Grammar, { rule, hook, range, ref, required, lit, repeated, opt, re, seq, optional, dot } from "../src/parser";
+import { RegularExpr } from "../src/term";
 let WS = () => repeated(ref("WS"));
 
 describe("WS", () => {
@@ -126,12 +127,18 @@ describe("regex", () => {
         expect(() => parser.parse(" ")).toThrow(new ParseError("No production match for ' ' at line 1: 1 (1)"));
     })
     it("should parse ident", () => {
-        expect(parser.parse("/x/")).toEqual(re(/x/));
+        let act = parser.parse("/x/");
+        let exp = re(/x/);
+        expect(`${(act as RegularExpr).chars}`).toEqual(`${(exp as RegularExpr).chars}`);
     })
     it("should parse array ident", () => {
-        expect(parser.parse("/\\b/")).toEqual(re(/\b/));
+        let act = parser.parse(String.raw`/\s/`);
+        let exp = re(/\s/);
+        expect(`${(act as RegularExpr).chars}`).toEqual(`${(exp as RegularExpr).chars}`);
     })
     it("should parse single char", () => {
-        expect(parser.parse("/[a-z]/")).toEqual(re(/[a-z]/));
+        let act = parser.parse("/[a-z]/");
+        let exp = re(/[a-z]/);
+        expect(`${(act as RegularExpr).chars}`).toEqual(`${(exp as RegularExpr).chars}`);
     })
 });

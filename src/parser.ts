@@ -1,7 +1,17 @@
-import { State, Expr, ParseError, Cache, concat } from "./core";
+import { State, Expr, ParseError, Cache, concat, BaseSingleState } from "./core";
 import { Ref } from "./ref";
 import { Sequence, Options, RangeExpr } from "./nonterm";
 import { Dot, Literal, RegularExpr } from "./term";
+import { createWriteStream, WriteStream } from "fs";
+
+const logFolder = undefined; //"/temp/log"
+
+function stream(name: string): WriteStream {
+    let timestamp = new Date().toISOString().replace(/\..+/, "").replace(/[-:T]/, ".");
+    return createWriteStream(`${logFolder}/${name}.${timestamp}.log`);
+}
+
+const log = logFolder ? new console.Console(stream("logger"), stream("error")) : console;
 
 export interface Parser {
     parse(input: Iterable<string>): any;
@@ -28,13 +38,14 @@ class Rule implements Expr {
             this.startState = () => { return {} };
             this.callback = callbacks[this.hook];
             if (this.callback === undefined) {
-                this.callback = (o: object) => o[this.hook];
+                this.callback = (o: object) => o == undefined ? o : o[this.hook];
             }
         }
     }
 
     start(parent: State, cache: Cache): State[] {
-        return [new RuleState(this, parent, this.startState(), this.callback)];
+        //        return [new RuleState(this, parent, this.startState(), this.callback)];
+        return [new RuleState(this, parent, undefined, this.callback)];
     }
 
     add(...rhs: Expr[]) {
@@ -49,15 +60,19 @@ class Rule implements Expr {
     }
 }
 
-class RuleState implements State {
-    constructor(private rule: Rule, public parent: State, private buffer: any,
-        private hook: (o: object) => any = o => o, private isComplete: boolean = false) {
+class RuleState extends BaseSingleState {
+    constructor(private rule: Rule, parent: State, buffer: any,
+        private hook: (o: object) => any = o => o, isComplete: boolean = false) {
+        super(parent, buffer, isComplete);
     }
-    public predict(cache: Cache): State[] {
-        if (!this.isComplete) {
-            return this.rule.rhs.start(this, cache);
-        }
-        return [];
+    public start(cache: Cache): State[] {
+        return this.rule.rhs.start(this, cache);
+    }
+    public advance(buffer: any, completed: boolean): State {
+        return new RuleState(this.rule, this.parent, buffer, this.hook, completed);
+    }
+    public prefix(): string {
+        return this.isComplete ? this.rule.name : "";
     }
     public complete(): State[] {
         if (this.isComplete) {
@@ -65,21 +80,6 @@ class RuleState implements State {
             return this.parent.next(value);
         }
         return [];
-    }
-    public next(update: any): State[] {
-        return [new RuleState(this.rule, this.parent, update, this.hook, true)];
-    }
-    public scan(ch: string): State[] {
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        return this.rule.toString();
     }
 }
 
@@ -148,6 +148,7 @@ export default class Grammar {
 
         accept(ch: string) {
             this.stats(ch);
+            log.info(`'%s' at line %d: %d (%d)`, ch, this.line, this.char, this.total);
             let cache = new this.RefCache(this.grammar);
             var next: State[] = [];
             try {
@@ -156,7 +157,7 @@ export default class Grammar {
                     this.states.push(...state.predict(cache));
                     this.states.push(...state.complete());
                     if (ch != "") {
-                        next.push(...state.scan(ch));
+                        next.push(...state.scan(ch, log));
                     } else if (state.isEnd()) {
                         next.push(state);
                     }
@@ -236,7 +237,7 @@ export function opt(...exprs: Expr[]): Expr {
     return new Options(exprs);
 }
 
-export function range(expr: Expr, low: number, high: number): Expr {
+export function range(expr: Expr, low: number, high: number = Number.MAX_SAFE_INTEGER): Expr {
     return new RangeExpr(expr, low, high);
 }
 
@@ -245,11 +246,11 @@ export function optional(...exprs: Expr[]): Expr {
 }
 
 export function required(...exprs: Expr[]): Expr {
-    return range(seq(...exprs), 1, -1);
+    return range(seq(...exprs), 1);
 }
 
 export function repeated(...exprs: Expr[]): Expr {
-    return range(seq(...exprs), 0, -1);
+    return range(seq(...exprs), 0);
 }
 
 export function ref(name: string, label: string = undefined): Expr {
@@ -257,6 +258,14 @@ export function ref(name: string, label: string = undefined): Expr {
         return new Ref(name).merge();
     }
     return new Ref(name).label(label);
+}
+
+const escapes = { "\\n": "\n", "\\r": "\r" };
+function escape(o: string): any {
+    if (escapes.hasOwnProperty(o)) {
+        return escapes[o];
+    }
+    return o.charAt(1);
 }
 
 let WS = () => repeated(ref("WS"));
@@ -271,6 +280,7 @@ const sbnfg = new Grammar("grammar", {
     dot: () => dot(),
     literal: (o: { lit: string }) => lit(o.lit),
     regex: (o: { pattern: string }) => re(o.pattern),
+    escape: escape
 },
     hook("grammar", "rules", WS(), ref("rule", "rules[]"), required(required(ref("WS")), ref("rule", "rules[]")), WS()),
     hook("rule", "rule", ref("ident", "name"), WS(), optional(lit("=>"), WS(), ref("ident", "hook"), WS()), lit("="), WS(), ref("expr", "rhs")),
@@ -285,10 +295,11 @@ const sbnfg = new Grammar("grammar", {
     hook("dot", "dot", lit(".")),
     hook("literal", "literal", opt(seq(lit("\""), ref("double", "lit"), lit("\"")), seq(lit("'"), ref("single", "lit"), lit("'")))),
     hook("regex", "regex", lit("/"), ref("re", "pattern"), lit("/")),
+    hook("escape", "escape", lit("\\"), dot()),
     rule("label", ref("ident"), optional(lit("[]"))),
     rule("ident", re(/[a-zA-Z_]/), repeated(re(/[a-zA-Z0-9_]/))),
-    rule("double", repeated(opt(seq(lit("\\"), dot()), re(/[^\\"]/)))),
-    rule("single", repeated(opt(seq(lit("\\"), dot()), re(/[^\\']/)))),
+    rule("double", repeated(opt(ref("escape"), re(/[^\\"]/)))),
+    rule("single", repeated(opt(ref("escape"), re(/[^\\']/)))),
     rule("re", required(opt(seq(lit("\\"), dot()), re(/[^\\/]/)))),
     rule("WS", re(/\s/))
 );

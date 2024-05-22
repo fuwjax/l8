@@ -15,7 +15,7 @@ const context = {
 }
 
 const grammar = new Grammar("grammar", context);
-grammar.configure(`
+grammar.configure(String.raw`
 grammar    => rules    = WS* rules[]:rule (WS+ rules[]:rule)* WS*
 rule       => rule     = name:ident WS* ("=>" WS* hook:ident WS*)? "=" WS* rhs:expr
 expr       => option   = exprs[]:seq (WS* "|" WS* exprs[]:seq)*
@@ -34,7 +34,7 @@ label  = ident "[]"?
 ident  = /[a-zA-Z_]/ /[a-zA-Z0-9_]/* 
 double = ("\\" . | /[^\\"]/)*
 single = ("\\" . | /[^\\']/)*
-re     = ("\\" . | /[^\\/]/)+
+re     = ("\\" . | /[^\\\/]/)+
 WS     = /\s/
 `);
 

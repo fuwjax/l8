@@ -23,7 +23,7 @@ export interface State {
 
     complete(): State[];
 
-    scan(ch: string): State[];
+    scan(ch: string, log: Console): State[];
 
     next(update: any): State[];
 
@@ -55,4 +55,120 @@ export function concat(...arr: any[]): any {
         }
     }
     return result == "" ? undefined : result;
+}
+
+export abstract class BaseState implements State {
+    constructor(protected parent: State, protected buffer: any = undefined) { }
+    abstract prefix(): string;
+
+    public predict(cache: Cache): State[] {
+        return [];
+    }
+    public complete(): State[] {
+        return [];
+    }
+    public next(update: any): State[] {
+        return [];
+    }
+    public scan(ch: string, log: Console): State[] {
+        return [];
+    }
+    public result(): any {
+        return this.buffer;
+    }
+    public isEnd(): boolean {
+        return false;
+    }
+    public toString(): string {
+        let s = this.prefix();
+        if (this.parent === undefined) {
+            return s;
+        }
+        return s ? `${this.parent} ${s}` : `${this.parent}`;
+    }
+}
+
+export abstract class BaseSeqState extends BaseState {
+    constructor(parent: State, buffer: any, protected pos = 0) {
+        super(parent, buffer);
+    }
+
+    abstract start(cache: Cache): State[];
+    abstract advance(update: any, newPos: number): State;
+    abstract isPending(): boolean;
+    abstract isComplete(): boolean;
+
+    public predict(cache: Cache): State[] {
+        if (this.isPending()) {
+            return this.start(cache);
+        }
+        return [];
+    }
+    public complete(): State[] {
+        if (this.isComplete()) {
+            return this.parent.next(this.buffer);
+        }
+        return [];
+    }
+    public next(update: any): State[] {
+        return [this.advance(update, this.pos + 1)];
+    }
+}
+
+export abstract class BaseSingleState extends BaseState {
+    constructor(parent: State, buffer: any = undefined, protected isComplete: boolean = false) {
+        super(parent, buffer);
+    }
+    abstract start(cache: Cache): State[];
+    abstract advance(buffer: any, completed: boolean): State;
+
+    public predict(cache: Cache): State[] {
+        if (!this.isComplete) {
+            return this.start(cache);
+        }
+        return [];
+    }
+    public complete(): State[] {
+        if (this.isComplete) {
+            return this.parent.next(this.buffer);
+        }
+        return [];
+    }
+    public next(update: any): State[] {
+        return [this.advance(update, true)];
+    }
+}
+
+export abstract class BaseTerminalState extends BaseState {
+    constructor(parent: State, buffer: any, private match: string = "") {
+        super(parent, buffer);
+    }
+    abstract isComplete(): boolean;
+    abstract accept(ch: string): boolean;
+    abstract advance(update: any, newMatch: string): State;
+    abstract lookahead(): string;
+
+    public scan(ch: string, log: Console): State[] {
+        if (this.isComplete()) {
+            return [];
+        }
+        if (this.accept(ch)) {
+            log.info(`✔ ${this}`);
+            return [this.advance(concat(this.buffer, ch), this.match + ch)];
+        }
+        log.info(`✘ ${this}`);
+        return [];
+    }
+    public complete(): State[] {
+        if (this.isComplete()) {
+            return this.parent.next(this.buffer);
+        }
+        return [];
+    }
+    public prefix(): string {
+        if (this.match) {
+            return this.isComplete() ? `'${this.match}'` : `'${this.match}' ● ${this.lookahead()}`
+        }
+        return this.isComplete() ? undefined : `● ${this.lookahead()}`
+    }
 }

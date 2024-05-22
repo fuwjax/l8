@@ -1,141 +1,89 @@
 
-import { State, Expr, Cache, concat } from "./core";
-
-class LiteralState implements State {
-    constructor(private parent: State, private literal: string[], private buffer: any, private pos = 0) {
-    }
-    public predict(cache: Cache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (this.pos < this.literal.length && this.literal[this.pos] == ch) {
-            return [new LiteralState(this.parent, this.literal, concat(this.buffer, ch), this.pos + 1)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.pos == this.literal.length) {
-            return this.parent.next(this.buffer);
-        }
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        return '"' + this.literal.slice(0, this.pos).join("") + "·" + this.literal.slice(this.pos).join("") + '"';
-    }
-}
+import { State, Expr, BaseTerminalState } from "./core";
 
 export class Literal implements Expr {
-    literal: string[];
+    private literal: string[];
     constructor(literal: string) {
+        //        console.log((typeof literal) + JSON.stringify(literal));
         this.literal = [...literal];
     }
-
-    public start(parent: State): State[] {
-        return [new LiteralState(parent, this.literal, parent.result())];
+    State = class extends BaseTerminalState {
+        constructor(private literal: Literal, parent: State, buffer: any = parent.result(), match: string = "", private pos = 0) {
+            super(parent, buffer, match);
+        }
+        public isComplete(): boolean {
+            return this.pos == this.literal.literal.length;
+        }
+        public advance(update: any, match: string): State {
+            return new this.literal.State(this.literal, this.parent, update, match, this.pos + 1);
+        }
+        public accept(ch: string): boolean {
+            return this.literal.literal[this.pos] == ch;
+        }
+        public lookahead(): string {
+            return "'" + this.literal.literal.slice(this.pos).join("") + "'";
+        }
     }
-
+    public start(parent: State): State[] {
+        return [new this.State(this, parent)];
+    }
     public toString(): string {
         return '"' + this.literal.join("") + '"';
     }
 }
 
-class DotState implements State {
-    constructor(private parent: State, private buffer: any, private isComplete = false) {
-    }
-    public predict(cache: Cache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (!this.isComplete) {
-            return [new DotState(this.parent, concat(this.buffer, ch), true)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.buffer);
-        }
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        if (this.isComplete) {
-            return ".·";
-        }
-        return '·.';
-    }
-}
-
 export class Dot implements Expr {
+    State = class extends BaseTerminalState {
+        constructor(parent: State, buffer: any = parent.result(), match: string = "", private completed = false) {
+            super(parent, buffer, match);
+        }
+        public isComplete(): boolean {
+            return this.completed;
+        }
+        public advance(update: any, match: string): State {
+            return new DOT.State(this.parent, update, match, true);
+        }
+        public accept(ch: string): boolean {
+            return true;
+        }
+        public lookahead(): string {
+            return ".";
+        }
+    }
     public start(parent: State): State[] {
-        return [new DotState(parent, parent.result())];
+        return [new this.State(parent)];
     }
     public toString(): string {
         return '.';
     }
 }
+const DOT = new Dot();
 
-class RegExState implements State {
-    constructor(private parent: State, private chars: RegExp, private buffer: any, private isComplete: boolean = false) {
-    }
-    public predict(cache: Cache): State[] {
-        return [];
-    }
-    public next(result: any): State[] {
-        return [];
-    }
-    public scan(ch: string): State[] {
-        if (!this.isComplete && this.chars.test(ch)) {
-            return [new RegExState(this.parent, this.chars, concat(this.buffer, ch), true)];
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.buffer);
-        }
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        if (this.isComplete) {
-            return `${this.chars}·`;
-        }
-        return `·${this.chars}`;
-    }
-}
-
-// the intention is to only match character classes, i.e. [a-zA-Z0-9]
+// the intention is to only match single character patterns like character classes, i.e. [a-zA-Z0-9]
 export class RegularExpr implements Expr {
-    chars: RegExp;
+    public chars: RegExp;
     constructor(charclass: string | RegExp) {
         this.chars = new RegExp(charclass);
     }
-
-    start(parent: State): State[] {
-        return [new RegExState(parent, this.chars, parent.result())];
+    State = class extends BaseTerminalState {
+        constructor(private re: RegularExpr, parent: State, buffer: any = parent.result(), match: string = "", private completed = false) {
+            super(parent, buffer, match);
+        }
+        public accept(ch: string): boolean {
+            return this.re.chars.test(ch);
+        }
+        public advance(update: any, newMatch: string): State {
+            return new this.re.State(this.re, this.parent, update, newMatch, true);
+        }
+        public isComplete(): boolean {
+            return this.completed;
+        }
+        public lookahead(): string {
+            return `${this.re.chars}`;
+        }
+    }
+    public start(parent: State): State[] {
+        return [new this.State(this, parent)];
     }
     public toString(): string {
         return this.chars.toString();

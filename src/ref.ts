@@ -1,131 +1,101 @@
-import { State, Expr, ParseError, Cache, concat } from "./core";
+import { State, Expr, ParseError, Cache, concat, BaseSingleState } from "./core";
 
-class RootState implements State {
-    constructor(private rule: Expr, public isComplete: boolean = false, public buffer: any = undefined) { }
-    public predict(cache: Cache): State[] {
-        if (!this.isComplete) {
-            return this.rule.start(this, cache);
-        }
-        return [];
+class RootState extends BaseSingleState {
+    constructor(private rule: Expr, isComplete: boolean = false, buffer: any = undefined) {
+        super(undefined, buffer, isComplete)
     }
-    public next(update: any): State[] {
-        return [new RootState(this.rule, true, update)];
+    public start(cache: Cache): State[] {
+        return this.rule.start(this, cache);
+    }
+    public advance(buffer: any, completed: boolean): State {
+        return new RootState(this.rule, completed, buffer)
     }
     public complete(): State[] {
         return [];
     }
-    public scan(ch: string): State[] {
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
     public isEnd(): boolean {
         return this.isComplete;
     }
-    public toString(): string {
-        return "<ROOT>";
+    public prefix(): string {
+        return this.isComplete ? "$" : "";
     }
 }
 
+
 class Merge implements Expr {
     constructor(public expr: Expr) { }
+    State = class extends BaseSingleState {
+        constructor(private merge: Merge, parent: State, buffer: any, isComplete: boolean = false) {
+            super(parent, buffer, isComplete);
+        }
+        public advance(buffer: any, completed: boolean): State {
+            return new this.merge.State(this.merge, this.parent, buffer, completed);
+        }
+        public start(cache: Cache): State[] {
+            return this.merge.expr.start(this, cache);
+        }
+        public prefix(): string {
+            return undefined; // this is a synthetic state
+        }
+        public next(update: any): State[] {
+            return super.next(concat(this.buffer, update));
+        }
+    }
     public start(parent: State, cache: Cache): State[] {
-        return [new MergeState(this, parent, parent.result())];
+        return [new this.State(this, parent, parent.result())];
     }
     public toString(): string {
         return this.expr.toString();
     }
 }
 
-class MergeState implements State {
-    constructor(private merge: Merge, public parent: State, private buffer: any, private isComplete: boolean = false) { }
-    public predict(cache: Cache): State[] {
-        if (!this.isComplete) {
-            return this.merge.expr.start(this, cache);
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.buffer);
-        }
-        return [];
-    }
-    public next(update: any): State[] {
-        return [new MergeState(this.merge, this.parent, concat(this.buffer, update), true)];
-    }
-    public scan(ch: string): State[] {
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        return this.merge.toString();
-    }
-}
-
 class Label implements Expr {
     constructor(public label: string, public expr: Expr) { }
+    State = class extends BaseSingleState {
+        constructor(private label: Label, parent: State, buffer: any, isComplete: boolean = false) {
+            super(parent, buffer, isComplete);
+        }
+        public advance(buffer: any, completed: boolean): State {
+            return new this.label.State(this.label, this.parent, buffer, completed);
+        }
+        public start(cache: Cache): State[] {
+            return this.label.expr.start(this, cache);
+        }
+        public prefix(): string {
+            return undefined; // this is a synthetic state
+        }
+        private set(value: any): any {
+            if (value == undefined) {
+                return this.buffer;
+            }
+            let buff: object;
+            if (typeof this.buffer != "object") {
+                buff = {};
+            } else {
+                buff = Object.assign({}, this.buffer);
+            }
+            if (this.label.label.endsWith("[]")) {
+                let key = this.label.label.slice(0, -2);
+                let val: any[];
+                if (buff.hasOwnProperty(key)) {
+                    buff[key] = [...buff[key], value];
+                } else {
+                    buff[key] = [value];
+                }
+            } else {
+                buff[this.label.label] = value;
+            }
+            return buff;
+        }
+        public next(update: any): State[] {
+            return super.next(this.set(update));
+        }
+    }
     public start(parent: State, cache: Cache): State[] {
-        return [new LabelState(this, parent, parent.result())];
+        return [new this.State(this, parent, parent.result())];
     }
     public toString(): string {
         return `${this.label}:${this.expr}`;
-    }
-}
-
-class LabelState implements State {
-    constructor(private label: Label, public parent: State, private buffer: any, private isComplete: boolean = false) { }
-    public predict(cache: Cache): State[] {
-        if (!this.isComplete) {
-            return this.label.expr.start(this, cache);
-        }
-        return [];
-    }
-    public complete(): State[] {
-        if (this.isComplete) {
-            return this.parent.next(this.buffer);
-        }
-        return [];
-    }
-    set(value: any): any {
-        if (typeof this.buffer == "string") {
-            throw new ParseError(`cannot set with string accumulation`);
-        }
-        if (value == undefined) {
-            return this.buffer;
-        }
-        if (this.label.label.endsWith("[]")) {
-            let key = this.label.label.slice(0, -2);
-            let val: any[];
-            if (this.buffer.hasOwnProperty(key)) {
-                val = [...this.buffer[key], value];
-            } else {
-                val = [value];
-            }
-            return Object.assign({}, this.buffer, { [key]: val });
-        }
-        return Object.assign({}, this.buffer, { [this.label.label]: value });
-    }
-    public next(update: any): State[] {
-        return [new LabelState(this.label, this.parent, this.set(update), true)];
-    }
-    public scan(ch: string): State[] {
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        return this.label.toString();
     }
 }
 
@@ -164,15 +134,16 @@ export class Ref implements Expr {
     }
 }
 
-class RefState implements State {
-    constructor(private ref: string, private expr: Expr, public parents: State[], private buffer: any = undefined,
-        private isComplete: boolean = false) {
+class RefState extends BaseSingleState {
+    constructor(private ref: string, private expr: Expr, public parents: State[], buffer: any = undefined,
+        isComplete: boolean = false) {
+        super(undefined, buffer, isComplete);
     }
-    public predict(cache: Cache): State[] {
-        if (!this.isComplete) {
-            return this.expr.start(this, cache);
-        }
-        return [];
+    public advance(buffer: any, completed: boolean): State {
+        return new RefState(this.ref, this.expr, this.parents, buffer, completed);
+    }
+    public start(cache: Cache): State[] {
+        return this.expr.start(this, cache);
     }
     public complete(): State[] {
         if (this.isComplete) {
@@ -180,19 +151,7 @@ class RefState implements State {
         }
         return [];
     }
-    public next(update: any): State[] {
-        return [new RefState(this.ref, this.expr, this.parents, update, true)];
-    }
-    public scan(ch: string): State[] {
-        return [];
-    }
-    public result(): any {
-        return this.buffer;
-    }
-    isEnd(): boolean {
-        return false;
-    }
-    public toString(): string {
-        return this.ref;
+    public prefix(): string {
+        return this.isComplete ? this.ref : "";
     }
 }
